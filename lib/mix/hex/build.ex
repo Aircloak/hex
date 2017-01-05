@@ -7,18 +7,13 @@ defmodule Mix.Hex.Build do
   @meta_fields @error_fields ++ @warn_fields ++ ~w(elixir extra)a
   @max_description_length 300
 
-  def prepare_package! do
-    Hex.start
-    Hex.Utils.ensure_registry(fetch: false)
+  def prepare_package do
     Mix.Project.get!
-
     config = Mix.Project.config
     raise_if_umbrella_project!(config)
 
     package = Enum.into(config[:package] || [], %{})
-
     {deps, exclude_deps} = dependencies(config)
-
     meta = meta_for(config, package, deps)
 
     %{config: config, package: package, deps: deps,
@@ -36,32 +31,29 @@ defmodule Mix.Hex.Build do
       end)
     end
 
-    Enum.each(@meta_fields, &print_meta(meta, &1))
+    Enum.each(@meta_fields, &print_metadata(meta, &1))
 
     errors =
-      error_missing!(meta) ++
-      error_long_description(meta) ++
-      error_missing_files(package_files) ++
+      check_missing_fields(meta) ++
+      check_description_length(meta) ++
+      check_missing_files(package_files || []) ++
       check_excluded_deps(exclude_deps)
 
     if errors != [] do
-      error_msg =
-        ["Stopping package build due to errors." | errors]
-        |> Enum.join("\n")
-      Mix.raise(error_msg)
+      ["Stopping package build due to errors." | errors]
+      |> Enum.join("\n")
+      |> Mix.raise()
     end
   end
 
   defp check_excluded_deps([]), do: []
   defp check_excluded_deps(deps) do
-    deps
-    |> Enum.into(["Excluded dependencies (not part of the Hex package):"], &("    #{&1}"))
-    |> Enum.join("\n")
-    |> List.wrap()
+    ["Dependencies excluded from the package (only Hex packages can be dependencies): #{Enum.join(deps, ", ")}"]
   end
 
   defp meta_for(config, package, deps) do
-    Keyword.take(config, [:app, :version, :elixir, :description])
+    config
+    |> Keyword.take([:app, :version, :elixir, :description])
     |> Enum.into(%{})
     |> Map.merge(package)
     |> package(config)
@@ -70,7 +62,8 @@ defmodule Mix.Hex.Build do
 
   defp dependencies(meta) do
     deps = Enum.map(meta[:deps] || [], &Hex.Mix.dep/1)
-    {include, exclude} = Enum.partition(deps, &(package_dep?(&1) and prod_dep?(&1)))
+    deps = Enum.filter(deps, &prod_dep?/1)
+    {include, exclude} = Enum.partition(deps, &package_dep?/1)
 
     Enum.each(include, fn {app, _req, opts} ->
       if opts[:override] do
@@ -100,15 +93,15 @@ defmodule Mix.Hex.Build do
 
     package
     |> Map.put(:files, files)
-    |> maybe_put(:description, fn _ -> package[:description] end, &String.strip/1)
-    |> maybe_put(:name, fn _ -> package[:name] || config[:app] end, & &1)
-    |> maybe_put(:build_tools, fn _ -> !package[:build_tools] && guess_build_tools(files) end, & &1)
+    |> maybe_put(:description, package[:description], &Hex.string_trim/1)
+    |> maybe_put(:name, package[:name] || config[:app], &(&1))
+    |> maybe_put(:build_tools, !package[:build_tools] && guess_build_tools(files), &(&1))
     |> Map.take(@meta_fields)
   end
 
-  defp maybe_put(map, key, check, value) do
-    if result = check.(map) do
-      Map.put(map, key, value.(result))
+  defp maybe_put(map, key, value, transform) do
+    if value do
+      Map.put(map, key, transform.(value))
     else
       map
     end
@@ -151,72 +144,63 @@ defmodule Mix.Hex.Build do
     end
   end
 
-  defp print_meta(meta, :files) do
-    if meta[:files] != [] do
-      Hex.Shell.info("  Files:")
-      Enum.each(meta[:files], &Hex.Shell.info("    #{&1}"))
-    else
-      Hex.Shell.error("No files")
+  defp print_metadata(metadata, :files) do
+    case metadata[:files] do
+      [] ->
+        Hex.Shell.error("No files")
+      files ->
+        Hex.Shell.info("  Files:")
+        Enum.each(files, &Hex.Shell.info("    #{&1}"))
     end
   end
 
-  defp print_meta(meta, key) do
-    if value = meta[key] do
-      key = key |> Atom.to_string |> String.replace("_", " ") |> String.capitalize
-      value = meta_value(value)
+  defp print_metadata(metadata, key) do
+    if value = metadata[key] do
+      key =
+        key
+        |> Atom.to_string
+        |> String.replace("_", " ")
+        |> String.capitalize
+      value = format_metadata_value(value)
       Hex.Shell.info("  #{key}: #{value}")
     end
   end
 
-  defp meta_value(list) when is_list(list),
+  defp format_metadata_value(list) when is_list(list),
     do: Enum.join(list, ", ")
-  defp meta_value(map) when is_map(map),
-    do: "\n    " <> Enum.map_join(map, "\n    ", fn {k, v} -> "#{k}: #{v}" end)
-  defp meta_value(value),
+  defp format_metadata_value(map) when is_map(map),
+    do: "\n    " <> Enum.map_join(map, "\n    ", fn {key, val} -> "#{key}: #{val}" end)
+  defp format_metadata_value(value),
     do: value
 
-  defp missing_files(nil), do: []
-  defp missing_files(files) do
-    Enum.filter(files, &(Path.wildcard(&1) == []))
+  defp check_missing_fields(metadata) do
+    fields = @error_fields ++ @warn_fields
+    taken_fields = Map.take(metadata, fields) |> Map.keys
+    case fields -- taken_fields do
+      [] ->
+        []
+      missing ->
+        ["Missing metadata fields: #{Enum.join(missing, ", ")}"]
+    end
   end
 
-  defp error_missing!(meta) do
-    meta
-    |> missing(@error_fields ++ @warn_fields)
-    |> check_missing_fields()
-  end
+  defp check_description_length(metadata) do
+    descr = metadata[:description] || ""
 
-  defp check_missing_fields([]), do: []
-  defp check_missing_fields(fields) do
-    fields = Enum.join(fields, ", ")
-    ["Missing metadata fields: #{fields}"]
-  end
-
-  defp error_long_description(meta) do
-    description = meta[:description] || ""
-
-    if String.length(description) > @max_description_length do
+    if String.length(descr) > @max_description_length do
       ["Package description is very long (exceeds #{@max_description_length} characters)"]
     else
       []
     end
   end
 
-  defp error_missing_files(package_files) do
-    package_files
-    |> missing_files()
-    |> check_missing_files()
-  end
-
-  defp check_missing_files([]), do: []
-  defp check_missing_files(missing) do
-    missing = Enum.join(missing, ", ")
-    ["Missing files: #{missing}"]
-  end
-
-  defp missing(meta, fields) do
-    taken_fields = Map.take(meta, fields) |> Map.keys
-    fields -- taken_fields
+  defp check_missing_files(package_files) do
+    case Enum.filter(package_files, &(Path.wildcard(&1) == [])) do
+      [] ->
+        []
+      missing ->
+        ["Missing files: #{Enum.join(missing, ", ")}"]
+    end
   end
 
   @build_tools [
@@ -234,14 +218,13 @@ defmodule Mix.Hex.Build do
     base_files =
       paths
       |> Enum.filter(&(Path.dirname(&1) == "."))
-      |> Enum.into(HashSet.new)
+      |> Enum.into(Hex.Set.new)
 
-    Enum.flat_map(@build_tools, fn {file, tool} ->
-      if file in base_files,
-        do: [tool],
-      else: []
-    end)
-    |> default_build_tool
+    for {file, tool} <- @build_tools, file in base_files do
+      tool
+    end
+    |> default_build_tool()
+    |> Enum.uniq
   end
 
   defp default_build_tool([]), do: ["mix"]

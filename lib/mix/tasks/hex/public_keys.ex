@@ -41,8 +41,6 @@ defmodule Mix.Tasks.Hex.PublicKeys do
 
   def run(args) do
     Hex.start
-    Hex.Utils.ensure_registry(fetch: false)
-
     {opts, args, _} = OptionParser.parse(args, switches: @switches)
 
     case args do
@@ -53,41 +51,44 @@ defmodule Mix.Tasks.Hex.PublicKeys do
       ["remove", key|_] ->
         remove(key, opts)
     _ ->
-      Mix.raise "Invalid arguments, expected one of:\n" <>
-                "mix hex.public_keys list\n" <>
-                "mix hex.public_keys add URL_TO_REPO LOCAL_PATH_TO_KEY\n" <>
-                "mix hex.public_keys remove URL_TO_REPO"
+      Mix.raise """
+      Invalid arguments, expected one of:
+      mix hex.public_keys list
+      mix hex.public_keys add URL_TO_REPO LOCAL_PATH_TO_KEY
+      mix hex.public_keys remove URL_TO_REPO
+      """
     end
   end
 
   defp list(opts) do
-    for {id, key} <- Hex.PublicKey.public_keys do
+    for {id, key} <- Hex.Crypto.PublicKey.public_keys do
       Hex.Shell.info "* #{id}"
       if opts[:detailed] do
         Hex.Shell.info "\n#{key}"
       end
     end
 
-    Hex.Shell.info "Public keys (except in-memory ones) installed at: #{Hex.PublicKey.public_keys_path()}"
+    Hex.Shell.info "Public keys (except in-memory ones) installed at: " <>
+                   Hex.Crypto.PublicKey.public_keys_path()
   end
 
   defp add(id, source, opts) do
     data = File.read!(source)
     file = Base.url_encode64(id)
-    dest = Path.join(Hex.PublicKey.public_keys_path, file)
+    dest = Path.join(Hex.Crypto.PublicKey.public_keys_path, file)
 
     # Validate the key is good
-    _ = Hex.PublicKey.decode!(id, data)
+    _ = Hex.Crypto.PublicKey.decode!(id, data)
 
     if opts[:force] || should_install?(id, dest) do
-      File.mkdir_p!(Hex.PublicKey.public_keys_path)
+      File.mkdir_p!(Hex.Crypto.PublicKey.public_keys_path)
       File.write!(dest, data)
     end
   end
 
   defp remove(id, _opts) do
     file = Base.url_encode64(id)
-    path = Path.join(Hex.PublicKey.public_keys_path, file)
+    path = Path.join(Hex.Crypto.PublicKey.public_keys_path, file)
 
     if File.exists?(path) do
       File.rm!(path)

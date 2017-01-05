@@ -42,12 +42,12 @@ defmodule Hex.State do
       https_proxy:      load_config(config, ["https_proxy", "HTTPS_PROXY"], :https_proxy),
       offline?:         load_config(config, ["HEX_OFFLINE"], :offline) |> to_boolean |> default(false),
       check_cert?:      load_config(config, ["HEX_UNSAFE_HTTPS"], :unsafe_https) |> to_boolean |> default(false) |> Kernel.not,
-      check_registry?:  load_config(config, ["HEX_UNSAFE_REGISTRY"], :unsafe_registry) |> to_boolean |> default(true),
+      check_registry?:  load_config(config, ["HEX_UNSAFE_REGISTRY"], :unsafe_registry) |> to_boolean |> default(false) |> Kernel.not,
+      http_concurrency: load_config(config, ["HEX_HTTP_CONCURRENCY"], :http_concurrency) |> to_integer |> default(8),
       hexpm_pk:         @hexpm_pk,
-      registry_updated: false,
       httpc_profile:    :hex,
       ssl_version:      ssl_version(),
-      pbkdf2_iters:     32768,
+      pbkdf2_iters:     32_768,
       clean_pass:       true}
   end
 
@@ -56,7 +56,10 @@ defmodule Hex.State do
   if Mix.env == :test do
     def fetch(:httpc_profile) do
       profile = make_ref() |> :erlang.ref_to_list |> List.to_atom
-      {:ok, _pid} = :httpc_manager.start_link(profile, :only_session_cookies, :stand_alone)
+      {:ok, pid} = :httpc_manager.start_link(profile, :only_session_cookies, :stand_alone)
+      # Unlink to avoid race conditions where the manager closes before all requests finished
+      Process.unlink(pid)
+      {:ok, pid}
     end
   end
 
@@ -137,6 +140,13 @@ defmodule Hex.State do
   defp to_boolean("false"), do: false
   defp to_boolean("true"),  do: true
 
+  defp to_integer(nil), do: nil
+  defp to_integer(""), do: nil
+  defp to_integer(string) do
+    {int, _} = Integer.parse(string)
+    int
+  end
+
   defp default(nil, value), do: value
   defp default(value, _),   do: value
 
@@ -189,9 +199,4 @@ defmodule Hex.State do
     do: [major, minor, patch]
   defp version_pad([major, minor, patch | _]),
     do: [major, minor, patch]
-
-  defp to_integer(string) do
-    {int, _} = Integer.parse(string)
-    int
-  end
 end

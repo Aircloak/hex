@@ -3,12 +3,12 @@ defmodule Mix.Tasks.Hex.DocsTest do
   @moduletag :integration
 
   test "open fails when docs not found" do
-    docs_home = :home |> Hex.State.fetch!() |> Path.join("docs")
+    docs_home = Path.join(Hex.State.fetch!(:home), "docs")
     package = "decimal"
     version = "1.1.2"
     message = "Documentation file not found: #{docs_home}/#{package}/#{version}/index.html"
     assert_raise Mix.Error, message, fn ->
-      Mix.Tasks.Hex.Docs.run(["open", package, version])
+      Mix.Tasks.Hex.Docs.run(["open", package, version, "--offline"])
     end
   end
 
@@ -18,12 +18,11 @@ defmodule Mix.Tasks.Hex.DocsTest do
     latest_version = "1.1.2"
     bypass_mirror()
     Hex.State.put(:home, tmp_path())
+    docs_home = Path.join(Hex.State.fetch!(:home), "docs")
 
-    docs_home = :home |> Hex.State.fetch!() |> Path.join("docs")
-
-    auth = HexTest.HexWeb.new_key([user: "user", pass: "hunter42"])
-    HexTest.HexWeb.new_package(package, old_version, %{}, %{}, auth)
-    HexTest.HexWeb.new_package(package, latest_version, %{}, %{}, auth)
+    auth = HexWeb.new_key([user: "user", pass: "hunter42"])
+    HexWeb.new_package(package, old_version, %{}, %{}, auth)
+    HexWeb.new_package(package, latest_version, %{}, %{}, auth)
 
     in_tmp "docs", fn ->
       Mix.Tasks.Hex.Docs.run(["fetch", package])
@@ -42,7 +41,10 @@ defmodule Mix.Tasks.Hex.DocsTest do
     bypass_mirror()
     Hex.State.put(:home, tmp_path())
 
-    docs_home = :home |> Hex.State.fetch!() |> Path.join("docs")
+    docs_home =
+      :home
+      |> Hex.State.fetch!()
+      |> Path.join("docs")
 
     in_tmp "docs", fn ->
       Mix.Tasks.Hex.Docs.run(["fetch", package, version])
@@ -65,18 +67,13 @@ defmodule Mix.Tasks.Hex.DocsTest do
   end
 
   test "invalid arguments for docs task" do
-    deprecation_msg = """
-    [deprecation] Calling mix hex.docs without a command is deprecated, please use:
-      mix hex.publish docs
-    """
-    assert_raise Mix.Error, deprecation_msg, fn ->
-      Mix.Tasks.Hex.Docs.run([])
-    end
+    exception = assert_raise Mix.Error, fn -> Mix.Tasks.Hex.Docs.run([]) end
+    assert Exception.message(exception) =~ ~s([deprecation] The "mix hex.docs" command has changed)
 
     invalid_args_msg = """
-    invalid arguments, expected one of:
-      mix hex.docs fetch PACKAGE [VERSION]
-      mix hex.docs open PACKAGE [VERSION]
+    Invalid arguments, expected one of:
+    mix hex.docs fetch PACKAGE [VERSION]
+    mix hex.docs open PACKAGE [VERSION]
     """
 
     assert_raise Mix.Error, invalid_args_msg, fn ->
@@ -91,7 +88,7 @@ defmodule Mix.Tasks.Hex.DocsTest do
     end
 
     assert_raise Mix.Error, msg, fn ->
-      Mix.Tasks.Hex.Docs.run(["open"])
+      Mix.Tasks.Hex.Docs.run(["open", "--offline"])
     end
   end
 end

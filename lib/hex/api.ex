@@ -1,21 +1,11 @@
 defmodule Hex.API do
   alias Hex.API.Utils
-  alias Hex.API.VerifyHostname
 
-  @request_timeout 60_000
-  @secure_ssl_version {5, 3, 7}
+  @request_timeout 25_000
   @erlang_vendor 'application/vnd.hex+erlang'
 
-  require Record
-
-  Record.defrecordp :certificate, :OTPCertificate,
-    Record.extract(:OTPCertificate, from_lib: "public_key/include/OTP-PUB-KEY.hrl")
-
-  Record.defrecordp :tbs_certificate, :OTPTBSCertificate,
-    Record.extract(:OTPTBSCertificate, from_lib: "public_key/include/OTP-PUB-KEY.hrl")
-
   def request(method, url, headers, body \\ nil)
-      when (is_map(headers) or is_list(headers)) and (body == nil or is_map(body)) do
+  when (is_map(headers) or is_list(headers)) and (body == nil or is_map(body)) do
     default_headers = %{
       'accept' => @erlang_vendor,
       'accept-encoding' => 'gzip',
@@ -24,7 +14,7 @@ defmodule Hex.API do
 
     http_opts = [relaxed: true, timeout: @request_timeout] ++ Hex.Utils.proxy_config(url)
     opts = [body_format: :binary]
-    url = String.to_char_list(url)
+    url = Hex.string_to_charlist(url)
     profile = Hex.State.fetch!(:httpc_profile)
 
     request =
@@ -53,7 +43,7 @@ defmodule Hex.API do
     url = elem(request, 0)
     http_opts =
       http_opts
-      |> Keyword.put(:ssl, ssl_opts(url))
+      |> Keyword.put(:ssl, Hex.API.SSL.ssl_opts(url))
       |> Keyword.put_new(:autoredirect, false)
 
     case :httpc.request(method, request, http_opts, opts, profile) do
@@ -61,7 +51,7 @@ defmodule Hex.API do
         case handle_redirect(response) do
           {:ok, location} when times > 0 ->
             request = update_request(request, location)
-            request_with_redirect(method, request, http_opts, opts, profile, times-1)
+            request_with_redirect(method, request, http_opts, opts, profile, times - 1)
           {:ok, _location} ->
             Mix.raise "Too many redirects"
           :error ->
@@ -88,69 +78,17 @@ defmodule Hex.API do
   end
   defp handle_redirect(_), do: :error
 
-  def secure_ssl? do
-    check? = Hex.State.fetch!(:check_cert?)
-    if check? and Hex.State.fetch!(:ssl_version) <= @secure_ssl_version do
-      Mix.raise "Insecure HTTPS request (peer verification disabled), " <>
-                "please update to OTP 17.4 or later, or disable by setting " <>
-                "the environment variable HEX_UNSAFE_HTTPS=1"
-    end
-    check?
-  end
-
-  def ssl_opts(url) do
-    if secure_ssl?() do
-      url           = List.to_string(url)
-      hostname      = String.to_char_list(URI.parse(url).host)
-      verify_fun    = {&VerifyHostname.verify_fun/3, check_hostname: hostname}
-      partial_chain = &partial_chain(Hex.API.Certs.cacerts, &1)
-
-      [verify: :verify_peer, depth: 2, partial_chain: partial_chain,
-       cacerts: Hex.API.Certs.cacerts(), verify_fun: verify_fun,
-       server_name_indication: hostname]
-    else
-      [verify: :verify_none]
-    end
-  end
-
-  def partial_chain(cacerts, certs) do
-    certs = Enum.map(certs, &{&1, :public_key.pkix_decode_cert(&1, :otp)})
-    cacerts = Enum.map(cacerts, &:public_key.pkix_decode_cert(&1, :otp))
-
-    trusted =
-      Enum.find_value(certs, fn {der, cert} ->
-        trusted? =
-          Enum.find(cacerts, fn cacert ->
-            extract_public_key_info(cacert) == extract_public_key_info(cert)
-          end)
-
-        if trusted?, do: der
-      end)
-
-    if trusted do
-      {:trusted_ca, trusted}
-    else
-      :unknown_ca
-    end
-  end
-
-  defp extract_public_key_info(cert) do
-    cert
-    |> certificate(:tbsCertificate)
-    |> tbs_certificate(:subjectPublicKeyInfo)
-  end
-
   @chunk 10_000
 
   def request_tar(url, headers, body, progress) do
     default_headers = %{
       'accept' => @erlang_vendor,
       'user-agent' => user_agent(),
-      'content-length' => to_char_list(byte_size(body))}
+      'content-length' => Hex.to_charlist(byte_size(body))}
     headers = Enum.into(headers, default_headers)
     http_opts = [relaxed: true, timeout: @request_timeout] ++ Hex.Utils.proxy_config(url)
     opts = [body_format: :binary]
-    url = String.to_char_list(url)
+    url = Hex.string_to_charlist(url)
     profile = Hex.State.fetch!(:httpc_profile)
 
     body = fn
@@ -177,7 +115,10 @@ defmodule Hex.API do
     headers = Enum.into(headers, %{})
     Utils.handle_hex_message(headers['x-hex-message'])
 
-    body = body |> unzip(headers) |> decode(headers)
+    body =
+      body
+      |> unzip(headers)
+      |> decode(headers)
 
     {code, body, headers}
   end
@@ -217,7 +158,7 @@ defmodule Hex.API do
 
   def auth(opts) do
     if key = opts[:key] do
-      %{'authorization' => String.to_char_list(key)}
+      %{'authorization' => Hex.string_to_charlist(key)}
     else
       base64 = :base64.encode_to_string(opts[:user] <> ":" <> opts[:pass])
       %{'authorization' => 'Basic ' ++ base64}
@@ -227,7 +168,7 @@ defmodule Hex.API do
   defp retry(:get, times, fun) do
     case fun.() do
       {:http_error, _, _} when times > 1 ->
-        retry(:get, times-1, fun)
+        retry(:get, times - 1, fun)
       {:http_error, _, _} = error ->
         error
       other ->

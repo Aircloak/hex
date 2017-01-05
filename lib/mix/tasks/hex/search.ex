@@ -1,5 +1,6 @@
 defmodule Mix.Tasks.Hex.Search do
   use Mix.Task
+  alias Mix.Hex.Utils
 
   @shortdoc "Searches for package names"
 
@@ -14,26 +15,34 @@ defmodule Mix.Tasks.Hex.Search do
 
     case args do
       [package] ->
-        Hex.Utils.ensure_registry!()
-
-        Hex.Registry.search(package)
+        Hex.API.Package.search(package)
         |> lookup_packages
 
       _ ->
-        Mix.raise "Invalid arguments, expected: mix hex.search PACKAGE"
+        Mix.raise """
+        Invalid arguments, expected:
+        mix hex.search PACKAGE
+        """
     end
   end
 
-  defp lookup_packages([]) do
+  defp lookup_packages({200, [], _headers}) do
     Hex.Shell.info "No packages found"
   end
-  defp lookup_packages(packages) do
-    pkg_max_length = Enum.max_by(packages, &byte_size/1) |> byte_size
+  defp lookup_packages({200, packages, _headers}) do
+    values =
+      Enum.map(packages, fn package ->
+        [package["name"], latest(package["releases"]), url(package["name"])]
+      end)
 
-    Enum.each(packages, fn pkg ->
-      vsn = Hex.Registry.get_versions(pkg) |> List.last
-      pkg_name = String.ljust(pkg, pkg_max_length)
-      Hex.Shell.info "#{pkg_name} #{vsn}"
-    end)
+    Utils.print_table(["Package", "Version", "URL"], values)
+  end
+
+  defp latest([%{"version" => version} | _]) do
+    version
+  end
+
+  defp url(name) do
+    "https://hex.pm/packages/#{name}"
   end
 end

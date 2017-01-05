@@ -92,7 +92,6 @@ defmodule Hex.Mix do
       end)
 
     new_dep = {app, override, children}
-
     put_dep(deps, new_dep) ++ children
   end
 
@@ -175,16 +174,54 @@ defmodule Hex.Mix do
   Takes a map of `{name, version}` and returns them as a
   lock of Hex packages.
   """
-  @spec to_lock(%{}) :: %{}
   def to_lock(result) do
     Enum.into(result, %{}, fn {name, app, version} ->
-      checksum = Hex.Registry.get_checksum(name, version) |> String.downcase
-      managers = Hex.Registry.get_build_tools(name, version) |> Enum.map(&String.to_atom/1)
-      deps = Hex.Registry.get_deps(name, version) |> Enum.map(&registry_dep_to_def/1)
-      {String.to_atom(app), {:hex, String.to_atom(name), version, checksum, managers, deps}}
+      app = String.to_atom(app)
+      checksum = Hex.Registry.checksum(name, version) |> Base.encode16(case: :lower)
+      deps =
+        name
+        |> Hex.Registry.deps(version)
+        |> Enum.map(&registry_dep_to_def/1)
+        |> Enum.sort
+      managers =
+        app
+        |> managers()
+        |> Enum.sort
+        |> Enum.uniq
+      {app, {:hex, String.to_atom(name), version, checksum, managers, deps}}
     end)
+  end
+
+  # We need to get managers from manifest if a dependency is not in the lock
+  # but it's already fetched. Without the manifest we would only get managers
+  # from metadata during checkout or from the lock entry.
+  defp managers(nil), do: []
+  defp managers(app) do
+    path = Path.join([Mix.Project.deps_path, Atom.to_string(app), ".hex"])
+    case File.read(path) do
+      {:ok, file} ->
+        case Hex.SCM.parse_manifest(file) do
+          {_name, _version, _checksum, managers} ->
+            managers
+          _ ->
+            []
+        end
+      _ ->
+        []
+    end
   end
 
   defp registry_dep_to_def({name, app, req, optional}),
     do: {String.to_atom(app), req, hex: String.to_atom(name), optional: optional}
+
+  def packages_from_lock(lock) do
+    Enum.flat_map(lock, fn {_app, info} ->
+      case Hex.Utils.lock(info) do
+        [:hex, name, _version, _checksum, _managers, _deps] ->
+          [Atom.to_string(name)]
+        _ ->
+          []
+      end
+    end)
+  end
 end

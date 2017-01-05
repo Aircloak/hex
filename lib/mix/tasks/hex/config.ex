@@ -27,6 +27,8 @@ defmodule Mix.Tasks.Hex.Config do
       signature against the repository's public key
     * `http_proxy` - HTTP proxy server
     * `https_proxy` - HTTPS proxy server
+    * `http_concurrency` - Limits the number of concurrent HTTP requests in
+      flight, can be overridden by setting `HEX_HTTP_CONCURRENCY`
 
   ## Command line options
 
@@ -36,10 +38,8 @@ defmodule Mix.Tasks.Hex.Config do
   @switches [delete: :boolean]
 
   def run(args) do
-    {opts, args, _} = OptionParser.parse(args, switches: @switches)
-
     Hex.start
-    Hex.Utils.ensure_registry(fetch: false)
+    {opts, args, _} = OptionParser.parse(args, switches: @switches)
 
     case args do
       [] ->
@@ -49,7 +49,10 @@ defmodule Mix.Tasks.Hex.Config do
       [key, value] ->
         set(key, value)
       _ ->
-        Mix.raise "Invalid arguments, expected: mix hex.config KEY [VALUE]"
+        Mix.raise """
+        Invalid arguments, expected:
+        mix hex.config KEY [VALUE]
+        """
     end
   end
 

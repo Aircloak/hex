@@ -5,46 +5,68 @@ defmodule Hex.RemoteConverger do
 
   alias Hex.Registry
 
+  def post_converge do
+    Registry.open!(Registry.Server)
+    :ok
+  after
+    Registry.pdict_clean
+  end
+
   def remote?(dep) do
     !!dep.opts[:hex]
   end
 
   def converge(deps, lock) do
     Hex.start
-    Hex.Utils.ensure_registry!()
-    Hex.Registry.open!(Hex.Registry.ETS)
-    verify_lock(lock)
+    Registry.open!(Registry.Server)
 
     # We cannot use given lock here, because all deps that are being
     # converged have been removed from the lock by Mix
     # We need the old lock to get the children of Hex packages
     old_lock = Mix.Dep.Lock.read
 
-    locked    = prepare_locked(lock, old_lock, deps)
     top_level = Hex.Mix.top_level(deps)
     flat_deps = Hex.Mix.flatten_deps(deps, top_level)
-    reqs      = Hex.Mix.deps_to_requests(flat_deps)
+    requests  = Hex.Mix.deps_to_requests(flat_deps)
 
+    [Hex.Mix.packages_from_lock(lock), Hex.Mix.packages_from_lock(old_lock), Enum.map(requests, &elem(&1, 0))]
+    |> Enum.concat
+    |> Registry.prefetch
+
+    locked = prepare_locked(lock, old_lock, deps)
+
+    check_lock(lock)
     check_deps(deps, top_level)
-    check_input(reqs, locked)
+    check_input(requests, locked)
 
     deps      = Hex.Mix.prepare_deps(deps)
     top_level = Enum.map(top_level, &Atom.to_string/1)
 
-    Hex.Shell.info "Running dependency resolution"
+    Hex.Shell.info "Running dependency resolution..."
 
-    case Hex.Resolver.resolve(reqs, deps, top_level, locked) do
+    case Hex.Resolver.resolve(requests, deps, top_level, locked) do
       {:ok, resolved} ->
         print_success(resolved, locked)
         verify_resolved(resolved, old_lock)
         new_lock = Hex.Mix.to_lock(resolved)
         Hex.SCM.prefetch(new_lock)
-        Map.merge(lock, new_lock)
+        lock_merge(lock, new_lock)
       {:error, message} ->
         resolver_failed(message)
     end
   after
-    Hex.Registry.pdict_clean
+    if Version.compare(System.version, "1.4.0") == :lt do
+      Hex.Registry.Server.persist
+    end
+  end
+
+  defp lock_merge(old, new) do
+    Map.merge(old, new, fn
+      _, {:hex, name, version, checksum, managers, deps}, {:hex, name, version, checksum, _managers, _deps} ->
+        {:hex, name, version, checksum, managers, deps}
+      _, _old, new ->
+        new
+    end)
   end
 
   defp resolver_failed(message) do
@@ -60,7 +82,8 @@ defmodule Hex.RemoteConverger do
   def deps(%Mix.Dep{app: app}, lock) do
     case Hex.Utils.lock(lock[app]) do
       [:hex, name, version, _checksum, _managers, nil] ->
-        Hex.Utils.ensure_registry!(fetch: false)
+        Registry.open!(Registry.Server)
+        Registry.prefetch([Atom.to_string(name)])
         get_deps(name, version)
       [:hex, _name, _version, _checksum, _managers, deps] ->
         deps
@@ -68,12 +91,12 @@ defmodule Hex.RemoteConverger do
         []
     end
   after
-    Hex.Registry.pdict_clean
+    Registry.pdict_clean
   end
 
   defp get_deps(name, version) do
     name = Atom.to_string(name)
-    deps = try_get_deps(name, version)
+    deps = Registry.deps(name, version) || []
 
     for {name, app, req, optional} <- deps do
       app = String.to_atom(app)
@@ -88,15 +111,6 @@ defmodule Hex.RemoteConverger do
     end
   end
 
-  defp try_get_deps(name, version) do
-    if deps = Registry.get_deps(name, version) do
-      deps
-    else
-      Hex.Utils.ensure_registry!()
-      Registry.get_deps(name, version) || []
-    end
-  end
-
   defp check_deps(deps, top_level) do
     Enum.each(deps, fn dep ->
       if dep.app in top_level and dep.scm == Hex.SCM and is_nil(dep.requirement) do
@@ -106,8 +120,8 @@ defmodule Hex.RemoteConverger do
     end)
   end
 
-  defp check_input(reqs, locked) do
-    Enum.each(reqs, fn {name, _app, req, from} ->
+  defp check_input(requests, locked) do
+    Enum.each(requests, fn {name, _app, req, from} ->
       check_package_req(name, req, from)
     end)
 
@@ -117,7 +131,7 @@ defmodule Hex.RemoteConverger do
   end
 
   defp check_package_req(name, req, from) do
-    if Registry.get_versions(name) do
+    if Registry.versions(name) do
       if req != nil and Hex.Version.parse_requirement(req) == :error do
         Mix.raise "Required version #{inspect req} for package #{name} is incorrectly specified (from: #{from})"
       end
@@ -132,13 +146,31 @@ defmodule Hex.RemoteConverger do
     resolved = Map.drop(resolved, locked)
 
     if Map.size(resolved) != 0 do
-      Hex.Shell.info "Dependency resolution completed"
+      Hex.Shell.info "Dependency resolution completed:"
       resolved = Enum.sort(resolved)
       Enum.each(resolved, fn {name, version} ->
-        Hex.Shell.info "  #{name}: #{version}"
+        name
+        |> Registry.retired(version)
+        |> print_status(name, version)
       end)
     end
   end
+
+  defp print_status(nil, name, version) do
+    Hex.Shell.info IO.ANSI.format [:green, "  #{name} #{version}"]
+  end
+
+  defp print_status(retired, name, version) do
+    Hex.Shell.warn "  #{name} #{version} RETIRED!"
+    Hex.Shell.warn "    (#{retirement_reason(retired[:reason])}) #{retired[:message]}"
+  end
+
+  defp retirement_reason(:RETIRED_OTHER), do: "other"
+  defp retirement_reason(:RETIRED_INVALID), do: "invalid"
+  defp retirement_reason(:RETIRED_SECURITY), do: "security"
+  defp retirement_reason(:RETIRED_DEPRECATED), do: "deprecated"
+  defp retirement_reason(:RETIRED_RENAMED), do: "renamed"
+  defp retirement_reason(other), do: other
 
   defp verify_resolved(resolved, lock) do
     Enum.each(resolved, fn {name, app, version} ->
@@ -146,39 +178,46 @@ defmodule Hex.RemoteConverger do
 
       case Hex.Utils.lock(lock[String.to_atom(app)]) do
         [:hex, ^atom_name, ^version, checksum, _managers, deps] ->
-          registry_checksum = Hex.Registry.get_checksum(name, version)
-
-          if checksum && Base.decode16!(checksum, case: :lower) != Base.decode16!(registry_checksum),
-            do: Mix.raise "Registry checksum mismatch against lock (#{name} #{version})"
-
-          if deps do
-            deps =
-              Enum.map(deps, fn {app, req, opts} ->
-                {Atom.to_string(opts[:hex]), Atom.to_string(app), req, !!opts[:optional]}
-              end)
-
-            if Enum.sort(deps) != Enum.sort(Hex.Registry.get_deps(name, version)),
-              do: Mix.raise "Registry dependencies mismatch against lock (#{name} #{version})"
-          end
+          verify_registry(deps, name, version, checksum)
         _ ->
           :ok
       end
     end)
   end
 
-  defp verify_lock(lock) do
+  defp verify_registry(deps, name, version, checksum) do
+    registry_checksum = Registry.checksum(name, version)
+    if checksum && Base.decode16!(checksum, case: :lower) != registry_checksum do
+      Mix.raise "Registry checksum mismatch against lock (#{name} #{version})"
+    end
+
+    if deps, do: verify_dependencies(deps, name, version)
+  end
+
+  defp verify_dependencies(deps, name, version) do
+    deps =
+      Enum.map(deps, fn {app, req, opts} ->
+        {Atom.to_string(opts[:hex]), Atom.to_string(app), req, !!opts[:optional]}
+      end)
+
+    if Enum.sort(deps) != Enum.sort(Registry.deps(name, version)) do
+      Mix.raise "Registry dependencies mismatch against lock (#{name} #{version})"
+    end
+  end
+
+  defp check_lock(lock) do
     Enum.each(lock, fn {_app, info} ->
       case Hex.Utils.lock(info) do
         [:hex, name, version, _checksum, _managers, _deps] ->
-          verify_dep(Atom.to_string(name), version)
+          check_dep(Atom.to_string(name), version)
         _ ->
           :ok
       end
     end)
   end
 
-  defp verify_dep(app, version) do
-    if versions = Registry.get_versions(app) do
+  defp check_dep(app, version) do
+    if versions = Registry.versions(app) do
       unless version in versions do
         Mix.raise "Unknown package version #{app} #{version} in lockfile"
       end
@@ -198,8 +237,8 @@ defmodule Hex.RemoteConverger do
         [:hex, name, version, _checksum, _managers, nil] ->
           # Do not error on bad data in the old lock because we should just
           # fix it automatically
-          if deps = Registry.get_deps(Atom.to_string(name), version) do
-            apps = Enum.map(deps, &elem(&1, 0))
+          if deps = Registry.deps(Atom.to_string(name), version) do
+            apps = Enum.map(deps, &elem(&1, 1))
             [apps, do_with_children(apps, lock)]
           else
             []

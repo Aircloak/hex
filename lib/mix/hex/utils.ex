@@ -1,9 +1,9 @@
 defmodule Mix.Hex.Utils do
   @apikey_tag "HEXAPIKEY"
 
-  def table(header, values) do
+  def print_table(header, values) do
     header = Enum.map(header, &[:underline, &1])
-    widths = widths([header|values])
+    widths = widths([header | values])
 
     print_row(header, widths)
     Enum.each(values, &print_row(&1, widths))
@@ -17,8 +17,9 @@ defmodule Mix.Hex.Utils do
     do: 0
 
   defp print_row(strings, widths) do
-    Enum.map(Enum.zip(strings, widths), fn {string, width} ->
-      pad_size = width-ansi_length(string)+2
+    Enum.zip(strings, widths)
+    |> Enum.map(fn {string, width} ->
+      pad_size = width - ansi_length(string) + 2
       pad = :lists.duplicate(pad_size, ?\s)
       [string, :reset, pad]
     end)
@@ -26,14 +27,14 @@ defmodule Mix.Hex.Utils do
     |> Hex.Shell.info
   end
 
-  defp widths([head|tail]) do
+  defp widths([head | tail]) do
     widths = Enum.map(head, &ansi_length/1)
 
     Enum.reduce(tail, widths, fn list, acc ->
       Enum.zip(list, acc)
       |> Enum.map(fn {string, width} -> max(width, ansi_length(string)) end)
     end)
-  end
+  end 
 
   def generate_key(username, password) do
     Hex.Shell.info("Generating API key...")
@@ -69,8 +70,8 @@ defmodule Mix.Hex.Utils do
   end
 
   def encrypt_key(config, key, challenge \\ "Passphrase") do
-    password = password_get("#{challenge}:") |> String.strip
-    confirm = password_get("#{challenge} (confirm):") |> String.strip
+    password = password_get("#{challenge}:") |> Hex.string_trim
+    confirm = password_get("#{challenge} (confirm):") |> Hex.string_trim
     if password != confirm do
       Mix.raise "Entered passphrases do not match"
     end
@@ -84,7 +85,7 @@ defmodule Mix.Hex.Utils do
   end
 
   def decrypt_key(encrypted_key, challenge \\ "Passphrase") do
-    password = password_get("#{challenge}:") |> String.strip
+    password = password_get("#{challenge}:") |> Hex.string_trim
     case Hex.Crypto.decrypt(encrypted_key, password, @apikey_tag) do
       {:ok, key} ->
         key

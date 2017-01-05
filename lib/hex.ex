@@ -13,7 +13,7 @@ defmodule Hex do
   end
 
   def start(_, _) do
-    import Supervisor.Spec
+    dev_setup()
 
     Mix.SCM.append(Hex.SCM)
     Mix.RemoteConverger.register(Hex.RemoteConverger)
@@ -21,21 +21,15 @@ defmodule Hex do
     Hex.Version.start
     start_httpc()
 
-    children = [
-      worker(Hex.State, []),
-      worker(Hex.Registry.ETS, []),
-      worker(Hex.Parallel, [:hex_fetcher, [max_parallel: 64]]),
-    ]
-
     opts = [strategy: :one_for_one, name: Hex.Supervisor]
-    Supervisor.start_link(children, opts)
+    Supervisor.start_link(children(), opts)
   end
 
   def version,        do: unquote(Mix.Project.config[:version])
   def elixir_version, do: unquote(System.version)
   def otp_version,    do: unquote(Hex.Utils.otp_version)
 
-  defp start_httpc() do
+  defp start_httpc do
     :inets.start(:httpc, profile: :hex)
     opts = [
       max_sessions: 8,
@@ -45,5 +39,38 @@ defmodule Hex do
       pipeline_timeout: 60_000
     ]
     :httpc.set_options(opts, :hex)
+  end
+
+  if Version.compare(System.version, "1.3.0") == :lt do
+    def string_trim(string), do: String.strip(string)
+    def to_charlist(term), do: Kernel.to_char_list(term)
+    def string_to_charlist(string), do: String.to_char_list(string)
+  else
+    def string_trim(string), do: String.trim(string)
+    def to_charlist(term), do: Kernel.to_charlist(term)
+    def string_to_charlist(string), do: String.to_charlist(string)
+  end
+
+  if Mix.env == :test do
+    defp children do
+      import Supervisor.Spec
+      [worker(Hex.State, []),
+       worker(Hex.Parallel, [:hex_fetcher])]
+    end
+  else
+    defp children do
+      import Supervisor.Spec
+      [worker(Hex.State, []),
+       worker(Hex.Parallel, [:hex_fetcher]),
+       worker(Hex.Registry.Server, [])]
+    end
+  end
+
+  if Mix.env in [:dev, :test] do
+    defp dev_setup do
+      :erlang.system_flag(:backtrace_depth, 20)
+    end
+  else
+    defp dev_setup, do: :ok
   end
 end

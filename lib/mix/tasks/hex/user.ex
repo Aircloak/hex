@@ -35,6 +35,26 @@ defmodule Mix.Tasks.Hex.User do
 
       mix hex.user passphrase
 
+  ### Remove key
+
+  Removes given API key from account.
+
+  The key can no longer be used to authenticate API requests.
+
+      mix hex.user key --remove key_name
+
+  ### Remove all keys
+
+  Remove all API keys from your account.
+
+      mix hex.user key --remove-all
+
+  ### List keys
+
+  Lists all API keys associated with your account.
+
+      mix hex.user key --list
+
   ### Test authentication
 
   Tests if authentication works with the stored API key.
@@ -46,41 +66,56 @@ defmodule Mix.Tasks.Hex.User do
       mix hex.user reset password
   """
 
+  @switches [remove_all: :boolean, remove: :string, list: :boolean]
+
   def run(args) do
     Hex.start
-    Hex.Utils.ensure_registry(fetch: false)
-
-    {_, args, _} = OptionParser.parse(args, switches: [])
+    config = Hex.Config.read()
+    {opts, args, _} = OptionParser.parse(args, switches: @switches)
 
     case args do
       ["register"] ->
         register()
       ["whoami"] ->
-        whoami()
+        whoami(config)
       ["auth"] ->
         create_key()
       ["deauth"] ->
-        deauth()
+        deauth(config)
       ["passphrase"] ->
-        passphrase()
+        passphrase(config)
       ["reset", "password"] ->
         reset_password()
       ["test"] ->
-        test()
+        test(config)
+      ["key"] ->
+        process_key_task(opts, config)
       _ ->
-        Mix.raise "Invalid arguments, expected one of:\nmix hex.user register\n" <>
-                  "mix hex.user auth\nmix hex.user whoami\nmix hex.user deauth\nmix hex.user reset password"
+        Mix.raise """
+        Invalid arguments, expected one of:
+        mix hex.user register
+        mix hex.user auth
+        mix hex.user whoami
+        mix hex.user deauth
+        mix hex.user reset password
+        mix hex.user key --remove-all
+        mix hex.user key --remove KEY_NAME
+        mix hex.user key --list
+        """
     end
   end
 
-  defp whoami do
-    config = Hex.Config.read
+  defp process_key_task([remove_all: true], config), do: remove_all_keys(config)
+  defp process_key_task([remove: key], config), do: remove_key(key, config)
+  defp process_key_task([list: true], config), do: list_keys(config)
+
+  defp whoami(config) do
     username = local_user(config)
     Hex.Shell.info(username)
   end
 
   defp reset_password do
-    name = Hex.Shell.prompt("Username or Email:") |> String.strip
+    name = Hex.Shell.prompt("Username or Email:") |> Hex.string_trim
 
     case Hex.API.User.password_reset(name) do
       {code, _, _} when code in 200..299 ->
@@ -92,8 +127,7 @@ defmodule Mix.Tasks.Hex.User do
     end
   end
 
-  defp deauth do
-    config = Hex.Config.read
+  defp deauth(config) do
     username = local_user(config)
 
     config
@@ -105,9 +139,7 @@ defmodule Mix.Tasks.Hex.User do
                    "or create a new user with `mix hex.user register`"
   end
 
-  defp passphrase do
-    config = Hex.Config.read
-
+  defp passphrase(config) do
     key = cond do
       encrypted_key = config[:encrypted_key] ->
         Utils.decrypt_key(encrypted_key, "Current passphrase")
@@ -124,10 +156,10 @@ defmodule Mix.Tasks.Hex.User do
     Hex.Shell.info("By registering an account on Hex.pm you accept all our " <>
                    "policies and terms of service found at https://hex.pm/policies\n")
 
-    username = Hex.Shell.prompt("Username:") |> String.strip
-    email    = Hex.Shell.prompt("Email:") |> String.strip
-    password = Utils.password_get("Password:") |> String.strip
-    confirm  = Utils.password_get("Password (confirm):") |> String.strip
+    username = Hex.Shell.prompt("Username:") |> Hex.string_trim
+    email    = Hex.Shell.prompt("Email:") |> Hex.string_trim
+    password = Utils.password_get("Password:") |> Hex.string_trim
+    confirm  = Utils.password_get("Password (confirm):") |> Hex.string_trim
 
     if password != confirm do
       Mix.raise "Entered passwords do not match"
@@ -150,18 +182,63 @@ defmodule Mix.Tasks.Hex.User do
   end
 
   defp create_key do
-    username = Hex.Shell.prompt("Username:") |> String.strip
-    password = Utils.password_get("Password:") |> String.strip
+    username = Hex.Shell.prompt("Username:") |> Hex.string_trim
+    password = Utils.password_get("Password:") |> Hex.string_trim
 
     Utils.generate_key(username, password)
   end
 
-  defp test do
-    config = Hex.Config.read
+  defp remove_all_keys(config) do
+    auth = Utils.auth_info(config)
+
+    Hex.Shell.info "Removing all keys..."
+    case Hex.API.Key.delete_all(auth) do
+      {code, %{"name" => _, "authing_key" => true}, _headers} when code in 200..299 ->
+        Mix.Tasks.Hex.User.run(["deauth"])
+        :ok
+      {code, body, _headers} ->
+        Hex.Shell.error "Key removal failed"
+        Hex.Utils.print_error_result(code, body)
+    end
+  end
+
+  defp remove_key(key, config) do
+    auth = Utils.auth_info(config)
+
+    Hex.Shell.info "Removing key #{key}..."
+    case Hex.API.Key.delete(key, auth) do
+      {200, %{"name" => ^key, "authing_key" => true}, _headers} ->
+        Mix.Tasks.Hex.User.run(["deauth"])
+        :ok
+      {code, _body, _headers} when code in 200..299 ->
+        :ok
+      {code, body, _headers} ->
+        Hex.Shell.error "Key removal failed"
+        Hex.Utils.print_error_result(code, body)
+    end
+  end
+
+  defp list_keys(config) do
+    auth = Utils.auth_info(config)
+
+    case Hex.API.Key.get(auth) do
+      {code, body, _headers} when code in 200..299 ->
+        values = Enum.map(body, fn %{"name" => name, "inserted_at" => time} ->
+          [name, time]
+        end)
+        Utils.print_table(["Name", "Created at"], values)
+      {code, body, _headers} ->
+        Hex.Shell.error "Key fetching failed"
+        Hex.Utils.print_error_result(code, body)
+    end
+  end
+
+  # TODO
+  defp test(config) do
     username = local_user(config)
     auth = Utils.auth_info(config)
 
-    case Hex.API.User.get(username, auth) do
+    case Hex.API.User.test(username, auth) do
       {code, _, _} when code in 200..299 ->
         Hex.Shell.info("Successfully authed. Your key works.")
       {code, body, _} ->

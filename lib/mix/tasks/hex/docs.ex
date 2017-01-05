@@ -4,44 +4,54 @@ defmodule Mix.Tasks.Hex.Docs do
   @shortdoc "Fetch or open documentation of a package"
 
   @moduledoc """
-  Fetch or open documentation of a package
+  Fetch or open documentation of a package.
 
-      mix hex.docs fetch package <version>
+      mix hex.docs fetch PACKAGE [VERSION]
 
   It will retrieve and decompress the specified version of the documentation
   for a package. If you do not specify the `version` argument, this task will
   retrieve the latest documentation available in the mirror.
 
-      mix hex.docs open package <version>
+      mix hex.docs open PACKAGE [VERSION]
+
+  ## Command line options
+
+    * `--offline` - Open a local version available in your filesystem
+    * `--module Some.Module` - Open a specified module documentation page inside desired package
 
   It will open the specified version of the documentation for a package in a
   Web browser. If you do not specify the `version` argument, this task will
-  open the latest documentation available in your filesystem.
+  open the latest documentation.
   """
+
+  @switches [offline: :boolean, module: :string]
 
   def run(args) do
     Hex.start
-    {opts, args, _} = OptionParser.parse(args)
+    {opts, args, _} = OptionParser.parse(args, switches: @switches)
     opts = normalize_options(opts)
 
     case args do
       [] ->
-        deprecation_msg = """
-        [deprecation] Calling mix hex.docs without a command is deprecated, please use:
-          mix hex.publish docs
+        Mix.raise """
+        [deprecation] The "mix hex.docs" command has changed. To use the old
+        behaviour (publishing docs), use:
+
+            mix hex.publish docs
+
+        The new "mix hex.docs" command has to be invoked with at least one
+        argument. Call "mix help hex.docs" for more information.
         """
-        Mix.raise deprecation_msg
       ["fetch" | remaining] ->
         fetch_docs(remaining, opts)
       ["open" | remaining] ->
         open_docs(remaining, opts)
       _ ->
-        message = """
-        invalid arguments, expected one of:
-          mix hex.docs fetch PACKAGE [VERSION]
-          mix hex.docs open PACKAGE [VERSION]
+        Mix.raise """
+        Invalid arguments, expected one of:
+        mix hex.docs fetch PACKAGE [VERSION]
+        mix hex.docs open PACKAGE [VERSION]
         """
-        Mix.raise message
     end
   end
 
@@ -96,50 +106,90 @@ defmodule Mix.Tasks.Hex.Docs do
     Mix.raise "You must specify at least the name of a package"
   end
 
-  defp open_docs([name], opts) do
-    latest_version = find_latest_version("#{opts[:home]}/#{name}")
+  defp open_docs(package, opts) do
+    if opts[:offline] do
+      open_docs_offline(package, opts)
+    else
+      package
+      |> get_docs_url(opts)
+      |> browser_open
+    end
+  end
+
+  defp open_docs_offline([name], opts) do
+    {missing?, latest_version} = find_package_version(name, opts)
+    if missing? do
+      fetch_docs([name], opts)
+    end
     open_docs([name, latest_version], opts)
   end
 
-  defp open_docs([name, version], opts) do
+  defp open_docs_offline([name, version], opts) do
     index_path = Path.join([opts[:home], name, version, 'index.html'])
 
     open_file(index_path)
-   end
+  end
+
+  defp find_package_version(name, opts) do
+    if File.exists?("#{opts[:home]}/#{name}") do
+      {false, find_latest_version("#{opts[:home]}/#{name}")}
+    else
+      {true, find_package_latest_version(name)}
+    end
+  end
+
+  defp get_docs_url([name], opts) do
+    if module = opts[:module] do
+      Hex.Utils.hexdocs_module_url(name, module)
+    else
+      Hex.Utils.hexdocs_url(name)
+    end
+  end
+
+  defp get_docs_url([name, version], opts) do
+    if module = opts[:module] do
+      Hex.Utils.hexdocs_module_url(name, version, module)
+    else
+      Hex.Utils.hexdocs_url(name, version)
+    end
+  end
+
+  defp browser_open(path) do
+    start_browser_command =
+      case :os.type do
+        {:win32, _} ->
+          "start"
+        {:unix, :darwin} ->
+          "open"
+        {:unix, _} ->
+          "xdg-open"
+      end
+
+    if System.find_executable(start_browser_command) do
+      System.cmd(start_browser_command, [path])
+    else
+      Mix.raise "Command not found: #{start_browser_command}"
+    end
+  end
 
   defp open_file(path) do
     unless File.exists?(path) do
       Mix.raise "Documentation file not found: #{path}"
     end
 
-    start_browser_command =
-      case :os.type do
-        {:win32, _} ->
-          "start"
-        {:unix, _} ->
-          "open"
-      end
-
-    if System.find_executable(start_browser_command) do
-      System.cmd start_browser_command, [path]
-    else
-      Mix.raise "Command not found: #{start_browser_command}"
-    end
+    browser_open(path)
   end
 
   defp find_latest_version(path) do
     path
-    |> File.ls!()
+    |> File.ls!
     |> Enum.sort(&(Hex.Version.compare(&1, &2) == :gt))
-    |> List.first()
+    |> List.first
   end
 
   defp retrieve_compressed_docs(url, filename, opts) do
     target = Path.join(opts[:cache], filename)
-
-    unless File.exists?(opts[:cache]) do
-      File.mkdir_p! opts[:cache]
-    end
+    File.mkdir_p!(opts[:cache])
 
     unless File.exists?(target) do
       request_docs_from_mirror(url, target)
@@ -147,12 +197,8 @@ defmodule Mix.Tasks.Hex.Docs do
   end
 
   defp request_docs_from_mirror(url, target) do
-    case Hex.Repo.request(url, nil) do
-      {:ok, body} when is_binary(body) ->
-        File.write!(target, body)
-      other ->
-        other
-    end
+    {:ok, body, _} = Hex.Repo.request(url, nil)
+    File.write!(target, body)
   end
 
   defp extract_doc_contents(filename, target_dir, opts) do
@@ -162,8 +208,12 @@ defmodule Mix.Tasks.Hex.Docs do
   end
 
   defp normalize_options(opts) do
-    docs_root_path = :home |> Hex.State.fetch!() |> Path.join("docs")
-    cache_dir = Path.join(docs_root_path, ".cache")
-    Keyword.put(opts, :home, docs_root_path) |> Keyword.put(:cache, cache_dir)
+    home = Hex.State.fetch!(:home)
+    docs_root = Path.join(home, "docs")
+    cache_dir = Path.join(docs_root, ".cache")
+
+    opts
+    |> Keyword.put(:home, docs_root)
+    |> Keyword.put(:cache, cache_dir)
   end
 end

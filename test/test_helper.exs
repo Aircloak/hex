@@ -19,7 +19,7 @@ unless :integration in ExUnit.configuration[:exclude] do
     "maintainers" => ["John Doe", "Jane Doe"],
     "licenses" => ["GPL2", "MIT", "Apache"],
     "links" => %{"docs" => "http://docs", "repo" => "http://repo"},
-    "description" => "Builds docs"
+    "description" => "Some description"
   }
 
   auth = HexWeb.new_user("user", "user@mail.com", "hunter42", "my_key")
@@ -39,6 +39,7 @@ unless :integration in ExUnit.configuration[:exclude] do
   HexWeb.new_package("foo", "0.1.0", [], pkg_meta, auth)
   HexWeb.new_package("foo", "0.1.1", [], pkg_meta, auth)
   HexWeb.new_package("bar", "0.1.0", [foo: "~> 0.1.0"], pkg_meta, auth)
+  HexWeb.new_package("baz", "0.1.0", [foo: "0.1.0"], pkg_meta, auth)
   HexWeb.new_package("beta", "1.0.0", [], pkg_meta, auth)
   HexWeb.new_package("beta", "1.1.0-beta", [], pkg_meta, auth)
 end

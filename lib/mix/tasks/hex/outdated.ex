@@ -26,15 +26,15 @@ defmodule Mix.Tasks.Hex.Outdated do
   @switches [all: :boolean, pre: :boolean]
 
   def run(args) do
-    {opts, args, _} = OptionParser.parse(args, switches: @switches)
     Hex.start
-    Hex.Utils.ensure_registry!()
+    {opts, args, _} = OptionParser.parse(args, switches: @switches)
 
     lock = Mix.Dep.Lock.read
     deps = Mix.Dep.loaded([]) |> Enum.filter(& &1.scm == Hex.SCM)
 
-    # Re-open registry because loading deps cleans the process dict
-    Hex.Utils.ensure_registry!()
+    Hex.Registry.open!(Hex.Registry.Server)
+    Hex.Mix.packages_from_lock(lock)
+    |> Hex.Registry.prefetch
 
     case args do
       [app] ->
@@ -66,29 +66,28 @@ defmodule Mix.Tasks.Hex.Outdated do
 
     requirements =
       if dep.top_level do
-        [["mix.exs", dep.requirement]|requirements]
+        [["mix.exs", dep.requirement] | requirements]
       else
         requirements
       end
 
     if outdated? do
       ["There is newer version of the dependency available ", :bright, latest, " > ", current, :reset, "!"]
-      |> IO.ANSI.format
+      |> IO.ANSI.format_fragment
       |> Hex.Shell.info
     else
       ["Current version ", :bright, current, :reset, " of dependency is up to date!"]
-      |> IO.ANSI.format
+      |> IO.ANSI.format_fragment
       |> Hex.Shell.info
     end
 
-    Hex.Shell.info ""
-
-    header = ["Parent", "Requirement"]
+    header = ["Source", "Requirement"]
     values = Enum.map(requirements, &format_single_row(&1, latest))
-    Utils.table(header, values)
-
     Hex.Shell.info ""
-    Hex.Shell.info "A green requirement means that it matches the latest version."
+    Utils.print_table(header, values)
+
+    message = "A green requirement means that it matches the latest version."
+    Hex.Shell.info ["\n", message]
   end
 
   defp get_requirements(deps, app) do
@@ -101,16 +100,14 @@ defmodule Mix.Tasks.Hex.Outdated do
     end)
   end
 
-  defp format_single_row([parent, req], latest) do
+  defp format_single_row([source, req], latest) do
     req_matches? = version_match?(latest, req)
     req = req || ""
     req_color = if req_matches?, do: :green, else: :red
-    [[:bright, parent], [req_color, req]]
+    [[:bright, source], [req_color, req]]
   end
 
   defp all(deps, lock, opts) do
-    header = ["Dependency", "Current", "Latest", "Requirement"]
-
     values =
       if(opts[:all], do: deps, else: Enum.filter(deps, & &1.top_level))
       |> sort
@@ -120,12 +117,15 @@ defmodule Mix.Tasks.Hex.Outdated do
     if Enum.empty?(values) do
       Hex.Shell.info "No hex dependencies"
     else
-      Utils.table(header, values)
+      header = ["Dependency", "Current", "Latest", "Update possible"]
+      Utils.print_table(header, values)
 
-      Hex.Shell.info ""
-      Hex.Shell.info "A green version in latest means you have the latest " <>
-                     "version of a given package. A green requirement means " <>
-                     "your current requirement matches the latest version."
+      message =
+        "A green version in latest means you have the latest " <>
+        "version of a given package. Update possible indicates " <>
+        "if your current requirement matches the latest version.\n" <>
+        "Run `mix hex.outdated APP` to see requirements for a specific dependency."
+      Hex.Shell.info ["\n" | message]
     end
   end
 
@@ -138,8 +138,14 @@ defmodule Mix.Tasks.Hex.Outdated do
       case Hex.Utils.lock(lock[dep.app]) do
         [:hex, package, lock_version, _checksum, _managers, _deps] ->
           latest_version = latest_version(package, lock_version, pre?)
-          req = dep.requirement
-          [[Atom.to_string(dep.app), lock_version, latest_version, req]]
+
+          requirements =
+            deps
+            |> get_requirements(dep.app)
+            |> Enum.map(fn [_, req_version] -> req_version end)
+          requirements = [dep.requirement | requirements]
+
+          [[Atom.to_string(dep.app), lock_version, latest_version, requirements]]
         _ ->
           []
       end
@@ -153,7 +159,7 @@ defmodule Mix.Tasks.Hex.Outdated do
     latest =
       package
       |> Atom.to_string
-      |> Hex.Registry.get_versions
+      |> Hex.Registry.versions
       |> highest_version(pre?)
 
     latest || default
@@ -172,18 +178,23 @@ defmodule Mix.Tasks.Hex.Outdated do
     List.last(versions)
   end
 
-  defp format_all_row([package, lock, latest, req]) do
+  defp format_all_row([package, lock, latest, requirements]) do
     outdated? = Hex.Version.compare(lock, latest) == :lt
     latest_color = if outdated?, do: :red, else: :green
 
-    req_matches? = version_match?(latest, req)
-    req = req || ""
-    req_color = if req_matches?, do: :green, else: :red
+    req_matches? = Enum.all?(requirements, &(version_match?(latest, &1)))
+
+    {update_possible_color, update_possible} =
+      case {outdated?, req_matches?} do
+        {true, true} -> {:green, "Yes"}
+        {true, false} -> {:red, "No"}
+        {false, _} -> {:green, ""}
+      end
 
     [[:bright, package],
      lock,
      [latest_color, latest],
-     [req_color, req]]
+     [update_possible_color, update_possible]]
   end
 
   defp version_match?(_version, nil), do: true

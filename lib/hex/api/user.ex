@@ -1,8 +1,12 @@
 defmodule Hex.API.User do
   alias Hex.API
 
-  def get(username, auth) do
-    API.request(:get, API.api_url("users/#{username}"), API.auth(auth))
+  def get(username) do
+    API.request(:get, API.api_url("users/#{username}"), [])
+  end
+
+  def test(username, auth) do
+    API.request(:get, API.api_url("users/#{username}/test"), API.auth(auth))
   end
 
   def new(username, email, password) do

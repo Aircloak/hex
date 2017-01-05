@@ -54,13 +54,13 @@ defmodule HexTest.HexWeb do
   end
 
   def start do
-    path                = String.to_char_list(path())
-    hexweb_mix_home     = String.to_char_list(hexweb_mix_home())
-    hexweb_mix_archives = String.to_char_list(hexweb_mix_archives())
+    path                = Hex.string_to_charlist(path())
+    hexweb_mix_home     = Hex.string_to_charlist(hexweb_mix_home())
+    hexweb_mix_archives = Hex.string_to_charlist(hexweb_mix_archives())
 
     key = Path.join(__DIR__, "../fixtures/test_priv.pem")
           |> File.read!
-          |> String.to_char_list
+          |> Hex.string_to_charlist
 
     env = [
       {'MIX_ENV', 'hex'},
@@ -103,7 +103,7 @@ defmodule HexTest.HexWeb do
 
     unless File.exists?(dir) do
       IO.puts "Unable to find #{dir}, make sure to clone the hex_web repository " <>
-              "into it to run integration tests"
+              "into it to run integration tests or set HEXWEB_PATH to its location"
       System.halt(1)
     end
   end
@@ -114,7 +114,7 @@ defmodule HexTest.HexWeb do
 
   defp hexweb_mix do
     if path = hexweb_elixir() do
-      path = String.to_char_list(path)
+      path = Hex.string_to_charlist(path)
       :os.find_executable('mix', path)
     else
       :os.find_executable('mix')
@@ -123,13 +123,17 @@ defmodule HexTest.HexWeb do
 
   defp hexweb_elixir do
     if path = System.get_env("HEXWEB_ELIXIR_PATH") do
-      path |> Path.expand |> Path.join("bin")
+      path
+      |> Path.expand
+      |> Path.join("bin")
     end
   end
 
   defp hexweb_otp do
     if path = System.get_env("HEXWEB_OTP_PATH") do
-      path |> Path.expand |> Path.join("bin")
+      path
+      |> Path.expand
+      |> Path.join("bin")
     end
   end
 
@@ -207,8 +211,9 @@ defmodule HexTest.HexWeb do
       {app, req} ->
         {app, %{app: app, requirement: req, optional: false}}
       {app, req, opts} ->
+        opts = Enum.into(opts, %{})
         default_opts = %{app: app, requirement: req, optional: false}
-        {opts[:hex] || app, Dict.merge(default_opts, opts)}
+        {opts[:hex] || app, Map.merge(default_opts, opts)}
     end)
 
     meta =
